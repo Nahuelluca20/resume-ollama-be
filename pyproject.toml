@@ -5,6 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "asyncpg>=0.30.0",
     "fastapi[standard]>=0.116.1",
     "ollama>=0.5.3",
+    "pymupdf>=1.26.3",
+    "python-multipart>=0.0.20",
+    "sqlmodel>=0.0.24",
 ]

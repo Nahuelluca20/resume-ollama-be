@@ -27,7 +27,7 @@ class EducationSchema(BaseModel):
 
 
 class SkillSchema(BaseModel):
-    name: str
+    name: Optional[str] = None
     category: Optional[str] = None
     proficiency_level: Optional[str] = None
     years_experience: Optional[int] = None

@@ -57,13 +57,28 @@ async def analyze_cv(
             else extracted_text
         )
         
+        # Handle case where analysis is None (parsing failed)
+        analysis = analysis_result.get("analysis")
+        if analysis is None:
+            # Create empty analysis structure when parsing fails
+            from app.schemas.cv_schemas import CVAnalysisSchema, PersonalInfoSchema
+            analysis = CVAnalysisSchema(
+                personal_info=PersonalInfoSchema(),
+                summary=None,
+                skills=[],
+                experience=[],
+                education=[],
+                certifications=[],
+                languages=[]
+            )
+        
         # Structure response
         response = CVAnalysisResponse(
             success=True,
             filename=file.filename,
             file_size=file.size or len(pdf_content),
             extracted_text_preview=text_preview,
-            analysis=analysis_result.get("analysis"),
+            analysis=analysis,
             metadata={
                 "model_used": analysis_result.get("model_used"),
                 "raw_text_length": analysis_result.get("raw_text_length"),

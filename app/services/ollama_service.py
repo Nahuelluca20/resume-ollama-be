@@ -2,9 +2,6 @@ import json
 import ollama
 from typing import Dict, Any
 from fastapi import HTTPException
-from app.schemas.cv_schemas import (
-    CVAnalysisSchema,
-)
 
 
 class OllamaService:
@@ -21,6 +18,45 @@ class OllamaService:
             Extract all relevant information including personal details, skills, experience, education, certifications, and languages.
             Be thorough and accurate in your extraction.
 
+            Please respond with a valid JSON object following this exact structure:
+            {{
+                "personal_info": {{
+                    "name": "Full Name or null",
+                    "email": "email@example.com or null",
+                    "phone": "Phone number or null",
+                    "location": "Location or null"
+                }},
+                "summary": "Professional summary or null",
+                "skills": [
+                    {{
+                        "name": "Skill name",
+                        "category": "Technical/Soft/Language/etc or null",
+                        "proficiency_level": "Beginner/Intermediate/Advanced/Expert or null",
+                        "years_experience": number or null
+                    }}
+                ],
+                "experience": [
+                    {{
+                        "company": "Company name or null",
+                        "role": "Job title or null",
+                        "start_date": "Start date or null",
+                        "end_date": "End date or null",
+                        "description": "Job description or null"
+                    }}
+                ],
+                "education": [
+                    {{
+                        "institution": "School/University name or null",
+                        "degree": "Degree type or null",
+                        "field": "Field of study or null",
+                        "start_year": "Start year or null",
+                        "end_year": "End year or null"
+                    }}
+                ],
+                "certifications": ["Certification 1", "Certification 2"],
+                "languages": ["Language 1", "Language 2"]
+            }}
+
             CV Content:
             {cv_text}
             """
@@ -33,14 +69,13 @@ class OllamaService:
                         "content": prompt,
                     },
                 ],
-                format=CVAnalysisSchema.model_json_schema(),
             )
-
+            print(response)
             analysis_text = response["message"]["content"].strip()
 
-            # Parse response directly with Pydantic
+            # Parse JSON response directly
             try:
-                analysis = CVAnalysisSchema.model_validate_json(analysis_text)
+                analysis = json.loads(analysis_text)
 
                 return {
                     "analysis": analysis,
@@ -49,8 +84,8 @@ class OllamaService:
                     "raw_text_length": len(cv_text),
                 }
 
-            except Exception as e:
-                # Fallback: return raw analysis if validation fails
+            except json.JSONDecodeError as e:
+                # Fallback: return raw analysis if JSON parsing fails
                 return {
                     "analysis": None,
                     "raw_response": analysis_text,

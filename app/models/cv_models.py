@@ -1,6 +1,8 @@
 from typing import Optional, List
 from datetime import datetime
-from sqlmodel import SQLModel, Field, Relationship
+from sqlmodel import SQLModel, Field, Relationship, Column
+from sqlalchemy import Text
+from pgvector.sqlalchemy import Vector
 
 
 class Candidate(SQLModel, table=True):
@@ -75,3 +77,29 @@ class ResumeSkill(SQLModel, table=True):
     
     resume: Resume = Relationship(back_populates="skills")
     skill: Skill = Relationship(back_populates="resume_skills")
+
+
+class ResumeEmbedding(SQLModel, table=True):
+    """Store vector embeddings for semantic search of resume sections."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    resume_id: int = Field(foreign_key="resume.id", index=True)
+    section_type: str = Field(index=True)  # 'summary', 'skills', 'experience', 'education', 'full_text'
+    section_content: str = Field(sa_column=Column(Text))
+    embedding: List[float] = Field(sa_column=Column(Vector(768)))  # Using 768-dimensional embeddings (nomic-embed-text)
+    model_name: str  # Track which embedding model was used
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    resume: Resume = Relationship()
+
+
+class CertificationEmbedding(SQLModel, table=True):
+    """Store embeddings for certifications for matching purposes."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    resume_id: int = Field(foreign_key="resume.id", index=True)
+    certification_text: str
+    embedding: List[float] = Field(sa_column=Column(Vector(768)))
+    model_name: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    resume: Resume = Relationship()

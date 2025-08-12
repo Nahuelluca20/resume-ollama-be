@@ -1,12 +1,16 @@
 import time
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi.responses import JSONResponse
 
 from app.services.pdf_service import PDFService
 from app.services.ollama_service import OllamaService
+from app.services.database_service import DatabaseService
+from app.services.embedding_service import EmbeddingService
 from app.schemas.cv_schemas import CVAnalysisResponse, HealthResponse, ErrorResponse
+from app.core.database import get_db_session
 
 router = APIRouter()
 
@@ -14,7 +18,10 @@ router = APIRouter()
 @router.post("/analyze-cv", response_model=CVAnalysisResponse)
 async def analyze_cv(
     file: UploadFile = File(...),
-    model: Optional[str] = Query(default=None, description="Ollama model to use for analysis")
+    model: Optional[str] = Query(default=None, description="Ollama model to use for analysis"),
+    store_in_db: bool = Query(default=True, description="Store analysis results in database"),
+    generate_embeddings: bool = Query(default=True, description="Generate embeddings for semantic search"),
+    db: AsyncSession = Depends(get_db_session)
 ):
     """
     Upload a PDF CV and get structured analysis using Ollama.
@@ -72,6 +79,69 @@ async def analyze_cv(
                 languages=[]
             )
         
+        # Store in database if requested
+        resume_id = None
+        embeddings_generated = False
+        
+        if store_in_db and analysis:
+            try:
+                db_service = DatabaseService(db)
+                resume = await db_service.store_cv_analysis(
+                    filename=file.filename,
+                    file_content=pdf_content,
+                    raw_text=extracted_text,
+                    analysis=analysis
+                )
+                resume_id = resume.id
+                
+                # Generate and store embeddings if requested
+                if generate_embeddings:
+                    try:
+                        embeddings = await EmbeddingService.generate_cv_embeddings(
+                            analysis, extracted_text
+                        )
+                        
+                        # Store each embedding section
+                        for section_type, embedding in embeddings.items():
+                            if section_type == "full_text":
+                                content = extracted_text
+                            elif section_type == "summary":
+                                content = analysis.summary
+                            elif section_type == "skills":
+                                content = " ".join([skill.name for skill in analysis.skills if skill.name])
+                            elif section_type == "experience":
+                                content = " | ".join([
+                                    f"{exp.role} at {exp.company}" for exp in analysis.experience 
+                                    if exp.role and exp.company
+                                ])
+                            elif section_type == "education":
+                                content = " | ".join([
+                                    f"{edu.degree} in {edu.field} from {edu.institution}" 
+                                    for edu in analysis.education 
+                                    if edu.degree and edu.institution
+                                ])
+                            elif section_type == "certifications":
+                                content = " | ".join(analysis.certifications)
+                            else:
+                                content = ""
+                            
+                            if content and embedding:
+                                await db_service.store_embedding(
+                                    resume_id=resume.id,
+                                    section_type=section_type,
+                                    content=content,
+                                    embedding=embedding,
+                                    model_name=EmbeddingService.DEFAULT_EMBEDDING_MODEL
+                                )
+                        
+                        embeddings_generated = True
+                        
+                    except Exception as e:
+                        print(f"Warning: Failed to generate embeddings: {str(e)}")
+                        
+            except Exception as e:
+                print(f"Warning: Failed to store in database: {str(e)}")
+        
         # Structure response
         response = CVAnalysisResponse(
             success=True,
@@ -83,7 +153,10 @@ async def analyze_cv(
                 "model_used": analysis_result.get("model_used"),
                 "raw_text_length": analysis_result.get("raw_text_length"),
                 "parsing_error": analysis_result.get("parsing_error"),
-                "raw_response": analysis_result.get("raw_response", "")[:1000]  # Limit raw response
+                "raw_response": analysis_result.get("raw_response", "")[:1000],  # Limit raw response
+                "stored_in_db": store_in_db and resume_id is not None,
+                "resume_id": resume_id,
+                "embeddings_generated": embeddings_generated
             },
             processing_time=processing_time,
             created_at=datetime.utcnow()

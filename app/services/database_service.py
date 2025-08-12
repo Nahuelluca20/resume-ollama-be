@@ -9,7 +9,6 @@ from app.models.cv_models import (
     Candidate, Resume, Experience, Education, Skill, ResumeSkill,
     ResumeEmbedding, CertificationEmbedding
 )
-from app.schemas.cv_schemas import CVAnalysisSchema
 
 
 class PIIHasher:
@@ -238,17 +237,17 @@ class DatabaseService:
         filename: str,
         file_content: bytes,
         raw_text: str,
-        analysis: CVAnalysisSchema
+        analysis: Dict[str, Any]
     ) -> Resume:
         """Store complete CV analysis results in database."""
         
         # Get or create candidate
-        personal_info = analysis.personal_info
+        personal_info = analysis.get("personal_info", {})
         candidate = await self.get_or_create_candidate(
-            name=personal_info.name,
-            email=personal_info.email,
-            phone=personal_info.phone,
-            location=personal_info.location
+            name=personal_info.get("name"),
+            email=personal_info.get("email"),
+            phone=personal_info.get("phone"),
+            location=personal_info.get("location")
         )
         
         # Create resume
@@ -257,47 +256,50 @@ class DatabaseService:
             filename=filename,
             file_content=file_content,
             raw_text=raw_text,
-            summary=analysis.summary
+            summary=analysis.get("summary")
         )
         
         # Store experiences
-        if analysis.experience:
+        experiences = analysis.get("experience", [])
+        if experiences:
             experience_dicts = [
                 {
-                    "company": exp.company,
-                    "role": exp.role,
-                    "start_date": exp.start_date,
-                    "end_date": exp.end_date,
-                    "description": exp.description
+                    "company": exp.get("company"),
+                    "role": exp.get("role"),
+                    "start_date": exp.get("start_date"),
+                    "end_date": exp.get("end_date"),
+                    "description": exp.get("description")
                 }
-                for exp in analysis.experience
+                for exp in experiences
             ]
             await self.store_experience(resume.id, experience_dicts)
         
         # Store education
-        if analysis.education:
+        educations = analysis.get("education", [])
+        if educations:
             education_dicts = [
                 {
-                    "institution": edu.institution,
-                    "degree": edu.degree,
-                    "field": edu.field,
-                    "start_year": edu.start_year,
-                    "end_year": edu.end_year
+                    "institution": edu.get("institution"),
+                    "degree": edu.get("degree"),
+                    "field": edu.get("field"),
+                    "start_year": edu.get("start_year"),
+                    "end_year": edu.get("end_year")
                 }
-                for edu in analysis.education
+                for edu in educations
             ]
             await self.store_education(resume.id, education_dicts)
         
         # Store skills
-        if analysis.skills:
+        skills = analysis.get("skills", [])
+        if skills:
             skill_dicts = [
                 {
-                    "name": skill.name,
-                    "category": skill.category,
-                    "proficiency_level": skill.proficiency_level,
-                    "years_experience": skill.years_experience
+                    "name": skill.get("name"),
+                    "category": skill.get("category"),
+                    "proficiency_level": skill.get("proficiency_level"),
+                    "years_experience": skill.get("years_experience")
                 }
-                for skill in analysis.skills
+                for skill in skills
             ]
             await self.store_skills(resume.id, skill_dicts)
         

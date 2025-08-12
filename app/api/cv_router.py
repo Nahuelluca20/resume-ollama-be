@@ -1,8 +1,10 @@
 import time
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Depends, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from fastapi.responses import JSONResponse
 
 from app.services.pdf_service import PDFService
@@ -11,64 +13,220 @@ from app.services.database_service import DatabaseService
 from app.services.embedding_service import EmbeddingService
 from app.schemas.cv_schemas import CVAnalysisResponse, HealthResponse, ErrorResponse
 from app.core.database import get_db_session
+from app.models.cv_models import CVProcessingJob, Resume, Candidate
 
 router = APIRouter()
+
+
+@router.post("/cv/upload")
+async def upload_cv(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    model: Optional[str] = Query(default=None, description="Ollama model to use for analysis"),
+    store_in_db: bool = Query(default=True, description="Store analysis results in database"),
+    generate_embeddings: bool = Query(default=True, description="Generate embeddings for semantic search"),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Upload a PDF CV and start background processing.
+    Returns job_id immediately for status polling.
+    """
+    try:
+        # Validate file immediately
+        PDFService.validate_pdf_file(file.content_type, file.size)
+        
+        # Read file content
+        file_content = await file.read()
+        
+        # Create processing job
+        job_id = str(uuid.uuid4())
+        job = CVProcessingJob(
+            id=job_id,
+            original_filename=file.filename or "uploaded_cv.pdf",
+            file_size=file.size or len(file_content),
+            status="uploaded",
+            current_step="File uploaded, queued for processing",
+            estimated_completion=datetime.utcnow() + timedelta(seconds=30),
+            file_content=file_content
+        )
+        
+        # Save job to database
+        db.add(job)
+        await db.commit()
+        
+        # Start background processing
+        background_tasks.add_task(
+            process_cv_background,
+            job_id,
+            file_content,
+            file.filename or "uploaded_cv.pdf",
+            model or OllamaService.DEFAULT_MODEL,
+            store_in_db,
+            generate_embeddings
+        )
+        
+        return {
+            "job_id": job_id,
+            "status": "uploaded",
+            "estimated_time": "30 seconds",
+            "message": "CV uploaded successfully. Processing started.",
+            "poll_url": f"/api/cv/status/{job_id}"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@router.get("/cv/status/{job_id}")
+async def get_cv_status(
+    job_id: str,
+    db: AsyncSession = Depends(get_db_session)
+):
+    """Get processing status for a CV job."""
+    try:
+        result = await db.execute(select(CVProcessingJob).where(CVProcessingJob.id == job_id))
+        job = result.scalar_one_or_none()
+        
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        response = {
+            "job_id": job_id,
+            "status": job.status,
+            "progress": job.progress_percentage,
+            "current_step": job.current_step,
+            "created_at": job.created_at,
+            "updated_at": job.updated_at,
+            "estimated_completion": job.estimated_completion
+        }
+        
+        if job.status == "completed" and job.resume_id:
+            response["cv_id"] = job.resume_id
+            response["redirect_url"] = f"/api/cv/{job.resume_id}"
+            response["success"] = True
+        
+        if job.status == "failed":
+            response["error"] = job.error_message
+            response["success"] = False
+            
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error checking status: {str(e)}")
+
+
+@router.get("/cv/{cv_id}")
+async def get_cv_analysis(
+    cv_id: int,
+    db: AsyncSession = Depends(get_db_session)
+):
+    """Get completed CV analysis results."""
+    try:
+        # Get resume with related data
+        result = await db.execute(
+            select(Resume)
+            .where(Resume.id == cv_id)
+        )
+        resume = result.scalar_one_or_none()
+        
+        if not resume:
+            raise HTTPException(status_code=404, detail="CV not found")
+        
+        # Get candidate info
+        candidate_result = await db.execute(
+            select(Candidate).where(Candidate.id == resume.candidate_id)
+        )
+        candidate = candidate_result.scalar_one_or_none()
+        
+        # Get related data through database service
+        db_service = DatabaseService(db)
+        
+        return {
+            "cv_id": cv_id,
+            "filename": resume.original_filename,
+            "summary": resume.summary,
+            "candidate": {
+                "name_hash": candidate.name_hash if candidate else None,
+                "email_hash": candidate.email_hash if candidate else None,
+                "phone_hash": candidate.phone_hash if candidate else None,
+                "location": candidate.location if candidate else None,
+            },
+            "raw_text_preview": resume.raw_text[:500] + "..." if len(resume.raw_text) > 500 else resume.raw_text,
+            "created_at": resume.created_at,
+            "updated_at": resume.updated_at,
+            "metadata": {
+                "file_hash": resume.file_hash,
+                "raw_text_length": len(resume.raw_text)
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving CV: {str(e)}")
 
 
 @router.post("/analyze-cv", response_model=CVAnalysisResponse)
 async def analyze_cv(
     file: UploadFile = File(...),
-    model: Optional[str] = Query(default=None, description="Ollama model to use for analysis"),
-    store_in_db: bool = Query(default=True, description="Store analysis results in database"),
-    generate_embeddings: bool = Query(default=True, description="Generate embeddings for semantic search"),
-    db: AsyncSession = Depends(get_db_session)
+    model: Optional[str] = Query(
+        default=None, description="Ollama model to use for analysis"
+    ),
+    store_in_db: bool = Query(
+        default=True, description="Store analysis results in database"
+    ),
+    generate_embeddings: bool = Query(
+        default=True, description="Generate embeddings for semantic search"
+    ),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """
     Upload a PDF CV and get structured analysis using Ollama.
-    
+
     - **file**: PDF file to analyze (max 10MB)
-    - **model**: Optional Ollama model name (defaults to llama3.2)
+    - **model**: Optional Ollama model name (defaults to gpt-oss:20b)
     """
     start_time = time.time()
-    
+
     try:
         # Validate file
         PDFService.validate_pdf_file(file.content_type, file.size)
-        
+
         # Read PDF content
         pdf_content = await file.read()
-        
+
         # Extract text from PDF
         extracted_text = await PDFService.extract_text_from_pdf(pdf_content)
-        
+
         if not extracted_text.strip():
-            raise HTTPException(
-                status_code=400, 
-                detail="No text content found in PDF"
-            )
-        
+            raise HTTPException(status_code=400, detail="No text content found in PDF")
+
         # Analyze with Ollama
         ollama_model = model or OllamaService.DEFAULT_MODEL
         analysis_result = await OllamaService.analyze_cv_with_ollama(
-            extracted_text, 
-            ollama_model
+            extracted_text, ollama_model
         )
-        
+
         # Calculate processing time
         processing_time = time.time() - start_time
-        
+
         # Create text preview
         text_preview = (
-            extracted_text[:500] + "..." 
-            if len(extracted_text) > 500 
+            extracted_text[:500] + "..."
+            if len(extracted_text) > 500
             else extracted_text
         )
-        
+
         # Handle case where analysis is None (parsing failed)
         analysis = analysis_result.get("analysis")
         if analysis is None:
             # Create empty analysis structure when parsing fails
             from app.schemas.cv_schemas import CVAnalysisSchema, PersonalInfoSchema
+
             analysis = CVAnalysisSchema(
                 personal_info=PersonalInfoSchema(),
                 summary=None,
@@ -76,13 +234,13 @@ async def analyze_cv(
                 experience=[],
                 education=[],
                 certifications=[],
-                languages=[]
+                languages=[],
             )
-        
+
         # Store in database if requested
         resume_id = None
         embeddings_generated = False
-        
+
         if store_in_db and analysis:
             try:
                 db_service = DatabaseService(db)
@@ -90,17 +248,17 @@ async def analyze_cv(
                     filename=file.filename,
                     file_content=pdf_content,
                     raw_text=extracted_text,
-                    analysis=analysis
+                    analysis=analysis,
                 )
                 resume_id = resume.id
-                
+
                 # Generate and store embeddings if requested
                 if generate_embeddings:
                     try:
                         embeddings = await EmbeddingService.generate_cv_embeddings(
                             analysis, extracted_text
                         )
-                        
+
                         # Store each embedding section
                         for section_type, embedding in embeddings.items():
                             if section_type == "full_text":
@@ -108,40 +266,51 @@ async def analyze_cv(
                             elif section_type == "summary":
                                 content = analysis.summary
                             elif section_type == "skills":
-                                content = " ".join([skill.name for skill in analysis.skills if skill.name])
+                                content = " ".join(
+                                    [
+                                        skill.name
+                                        for skill in analysis.skills
+                                        if skill.name
+                                    ]
+                                )
                             elif section_type == "experience":
-                                content = " | ".join([
-                                    f"{exp.role} at {exp.company}" for exp in analysis.experience 
-                                    if exp.role and exp.company
-                                ])
+                                content = " | ".join(
+                                    [
+                                        f"{exp.role} at {exp.company}"
+                                        for exp in analysis.experience
+                                        if exp.role and exp.company
+                                    ]
+                                )
                             elif section_type == "education":
-                                content = " | ".join([
-                                    f"{edu.degree} in {edu.field} from {edu.institution}" 
-                                    for edu in analysis.education 
-                                    if edu.degree and edu.institution
-                                ])
+                                content = " | ".join(
+                                    [
+                                        f"{edu.degree} in {edu.field} from {edu.institution}"
+                                        for edu in analysis.education
+                                        if edu.degree and edu.institution
+                                    ]
+                                )
                             elif section_type == "certifications":
                                 content = " | ".join(analysis.certifications)
                             else:
                                 content = ""
-                            
+
                             if content and embedding:
                                 await db_service.store_embedding(
                                     resume_id=resume.id,
                                     section_type=section_type,
                                     content=content,
                                     embedding=embedding,
-                                    model_name=EmbeddingService.DEFAULT_EMBEDDING_MODEL
+                                    model_name=EmbeddingService.DEFAULT_EMBEDDING_MODEL,
                                 )
-                        
+
                         embeddings_generated = True
-                        
+
                     except Exception as e:
                         print(f"Warning: Failed to generate embeddings: {str(e)}")
-                        
+
             except Exception as e:
                 print(f"Warning: Failed to store in database: {str(e)}")
-        
+
         # Structure response
         response = CVAnalysisResponse(
             success=True,
@@ -153,24 +322,23 @@ async def analyze_cv(
                 "model_used": analysis_result.get("model_used"),
                 "raw_text_length": analysis_result.get("raw_text_length"),
                 "parsing_error": analysis_result.get("parsing_error"),
-                "raw_response": analysis_result.get("raw_response", "")[:1000],  # Limit raw response
+                "raw_response": analysis_result.get("raw_response", "")[
+                    :1000
+                ],  # Limit raw response
                 "stored_in_db": store_in_db and resume_id is not None,
                 "resume_id": resume_id,
-                "embeddings_generated": embeddings_generated
+                "embeddings_generated": embeddings_generated,
             },
             processing_time=processing_time,
-            created_at=datetime.utcnow()
+            created_at=datetime.utcnow(),
         )
-        
+
         return response
-        
+
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Internal server error: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -180,20 +348,17 @@ def health_check():
     """
     try:
         health_data = OllamaService.check_ollama_health()
-        
+
         return HealthResponse(
             status=health_data["status"],
             ollama_available=health_data["ollama_available"],
             available_models=health_data["available_models"],
-            error=health_data.get("error")
+            error=health_data.get("error"),
         )
-        
+
     except Exception as e:
         return HealthResponse(
-            status="error",
-            ollama_available=False,
-            error=str(e),
-            available_models=[]
+            status="error", ollama_available=False, error=str(e), available_models=[]
         )
 
 
@@ -204,22 +369,182 @@ def list_models():
     """
     try:
         health_data = OllamaService.check_ollama_health()
-        
+
         if health_data["ollama_available"]:
             return {
                 "success": True,
                 "models": health_data["available_models"],
-                "default_model": OllamaService.DEFAULT_MODEL
+                "default_model": OllamaService.DEFAULT_MODEL,
             }
         else:
             return {
                 "success": False,
                 "error": health_data.get("error", "Ollama service unavailable"),
-                "models": []
+                "models": [],
             }
-            
+
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error listing models: {str(e)}"
+        raise HTTPException(status_code=500, detail=f"Error listing models: {str(e)}")
+
+
+async def update_job_status(
+    job_id: str,
+    status: str,
+    progress: int,
+    step: str,
+    resume_id: Optional[int] = None,
+    error_message: Optional[str] = None
+):
+    """Helper function to update job status in database."""
+    from app.core.database import get_db_session
+    
+    async for db in get_db_session():
+        try:
+            result = await db.execute(select(CVProcessingJob).where(CVProcessingJob.id == job_id))
+            job = result.scalar_one_or_none()
+            
+            if job:
+                job.status = status
+                job.progress_percentage = progress
+                job.current_step = step
+                job.updated_at = datetime.utcnow()
+                
+                if resume_id:
+                    job.resume_id = resume_id
+                if error_message:
+                    job.error_message = error_message
+                
+                await db.commit()
+        except Exception as e:
+            print(f"Error updating job status: {e}")
+        finally:
+            await db.close()
+        break
+
+
+async def process_cv_background(
+    job_id: str,
+    file_content: bytes,
+    filename: str,
+    model: str,
+    store_in_db: bool,
+    generate_embeddings: bool
+):
+    """Background task to process CV with progress updates."""
+    try:
+        # Update status: extracting
+        await update_job_status(job_id, "extracting", 20, "Extracting text from PDF")
+        
+        # Extract text from PDF
+        extracted_text = await PDFService.extract_text_from_pdf(file_content)
+        
+        if not extracted_text.strip():
+            await update_job_status(
+                job_id, "failed", 0, "Text extraction failed", 
+                error_message="No text content found in PDF"
+            )
+            return
+        
+        # Update status: analyzing
+        await update_job_status(job_id, "analyzing", 50, "Analyzing CV with LLM")
+        
+        # Analyze with Ollama (the slow part)
+        analysis_result = await OllamaService.analyze_cv_with_ollama(extracted_text, model)
+        
+        if not analysis_result.get("analysis"):
+            await update_job_status(
+                job_id, "failed", 0, "LLM analysis failed",
+                error_message=analysis_result.get("parsing_error", "LLM analysis failed")
+            )
+            return
+        
+        # Update status: storing
+        await update_job_status(job_id, "storing", 80, "Storing results in database")
+        
+        # Store in database if requested
+        resume_id = None
+        if store_in_db:
+            async for db in get_db_session():
+                try:
+                    db_service = DatabaseService(db)
+                    resume = await db_service.store_cv_analysis(
+                        filename=filename,
+                        file_content=file_content,
+                        raw_text=extracted_text,
+                        analysis=analysis_result["analysis"],
+                    )
+                    resume_id = resume.id
+                    
+                    # Generate embeddings if requested
+                    if generate_embeddings:
+                        await update_job_status(
+                            job_id, "generating_embeddings", 90, "Generating embeddings for semantic search"
+                        )
+                        
+                        try:
+                            embeddings = await EmbeddingService.generate_cv_embeddings(
+                                analysis_result["analysis"], extracted_text
+                            )
+                            
+                            # Store each embedding section
+                            for section_type, embedding in embeddings.items():
+                                if section_type == "full_text":
+                                    content = extracted_text
+                                elif section_type == "summary":
+                                    content = analysis_result["analysis"].get("summary", "")
+                                elif section_type == "skills":
+                                    skills = analysis_result["analysis"].get("skills", [])
+                                    content = " ".join([skill.get("name", "") for skill in skills if skill.get("name")])
+                                elif section_type == "experience":
+                                    experiences = analysis_result["analysis"].get("experience", [])
+                                    content = " | ".join([
+                                        f"{exp.get('role', '')} at {exp.get('company', '')}"
+                                        for exp in experiences
+                                        if exp.get('role') and exp.get('company')
+                                    ])
+                                elif section_type == "education":
+                                    educations = analysis_result["analysis"].get("education", [])
+                                    content = " | ".join([
+                                        f"{edu.get('degree', '')} in {edu.get('field', '')} from {edu.get('institution', '')}"
+                                        for edu in educations
+                                        if edu.get('degree') and edu.get('institution')
+                                    ])
+                                elif section_type == "certifications":
+                                    content = " | ".join(analysis_result["analysis"].get("certifications", []))
+                                else:
+                                    content = ""
+                                
+                                if content and embedding:
+                                    await db_service.store_embedding(
+                                        resume_id=resume.id,
+                                        section_type=section_type,
+                                        content=content,
+                                        embedding=embedding,
+                                        model_name=EmbeddingService.DEFAULT_EMBEDDING_MODEL,
+                                    )
+                        
+                        except Exception as e:
+                            print(f"Warning: Failed to generate embeddings: {str(e)}")
+                            # Continue processing even if embeddings fail
+                    
+                except Exception as e:
+                    await update_job_status(
+                        job_id, "failed", 0, "Database storage failed",
+                        error_message=f"Failed to store in database: {str(e)}"
+                    )
+                    return
+                finally:
+                    await db.close()
+                break
+        
+        # Complete successfully
+        await update_job_status(
+            job_id, "completed", 100, "Processing complete",
+            resume_id=resume_id
+        )
+        
+    except Exception as e:
+        await update_job_status(
+            job_id, "failed", 0, "Processing failed",
+            error_message=str(e)
         )

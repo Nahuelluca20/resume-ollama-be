@@ -2,8 +2,6 @@ import ollama
 from typing import List, Dict, Any, Optional
 from fastapi import HTTPException
 
-from app.schemas.cv_schemas import CVAnalysisSchema
-
 
 class EmbeddingService:
     """Service for generating embeddings using nomic-embed-text via Ollama."""
@@ -33,7 +31,7 @@ class EmbeddingService:
     
     @staticmethod
     async def generate_cv_embeddings(
-        analysis: CVAnalysisSchema,
+        analysis: Dict[str, Any],
         raw_text: str,
         model: str = DEFAULT_EMBEDDING_MODEL
     ) -> Dict[str, List[float]]:
@@ -48,16 +46,18 @@ class EmbeddingService:
                 )
             
             # Summary embedding
-            if analysis.summary:
+            summary = analysis.get("summary")
+            if summary:
                 embeddings["summary"] = await EmbeddingService.generate_embedding(
-                    analysis.summary, model
+                    summary, model
                 )
             
             # Skills embedding (concatenate all skills)
-            if analysis.skills:
+            skills = analysis.get("skills", [])
+            if skills:
                 skills_text = " ".join([
-                    f"{skill.name} ({skill.category})" if skill.category else skill.name
-                    for skill in analysis.skills if skill.name
+                    f"{skill.get('name')} ({skill.get('category')})" if skill.get('category') else skill.get('name')
+                    for skill in skills if skill.get('name')
                 ])
                 if skills_text:
                     embeddings["skills"] = await EmbeddingService.generate_embedding(
@@ -65,16 +65,17 @@ class EmbeddingService:
                     )
             
             # Experience embedding (concatenate all experience descriptions)
-            if analysis.experience:
+            experiences = analysis.get("experience", [])
+            if experiences:
                 experience_texts = []
-                for exp in analysis.experience:
+                for exp in experiences:
                     exp_parts = []
-                    if exp.role:
-                        exp_parts.append(exp.role)
-                    if exp.company:
-                        exp_parts.append(f"at {exp.company}")
-                    if exp.description:
-                        exp_parts.append(exp.description)
+                    if exp.get("role"):
+                        exp_parts.append(exp.get("role"))
+                    if exp.get("company"):
+                        exp_parts.append(f"at {exp.get('company')}")
+                    if exp.get("description"):
+                        exp_parts.append(exp.get("description"))
                     
                     if exp_parts:
                         experience_texts.append(" ".join(exp_parts))
@@ -86,16 +87,17 @@ class EmbeddingService:
                     )
             
             # Education embedding
-            if analysis.education:
+            educations = analysis.get("education", [])
+            if educations:
                 education_texts = []
-                for edu in analysis.education:
+                for edu in educations:
                     edu_parts = []
-                    if edu.degree:
-                        edu_parts.append(edu.degree)
-                    if edu.field:
-                        edu_parts.append(f"in {edu.field}")
-                    if edu.institution:
-                        edu_parts.append(f"from {edu.institution}")
+                    if edu.get("degree"):
+                        edu_parts.append(edu.get("degree"))
+                    if edu.get("field"):
+                        edu_parts.append(f"in {edu.get('field')}")
+                    if edu.get("institution"):
+                        edu_parts.append(f"from {edu.get('institution')}")
                     
                     if edu_parts:
                         education_texts.append(" ".join(edu_parts))
@@ -107,8 +109,9 @@ class EmbeddingService:
                     )
             
             # Certifications embedding
-            if analysis.certifications:
-                certifications_text = " | ".join(analysis.certifications)
+            certifications = analysis.get("certifications", [])
+            if certifications:
+                certifications_text = " | ".join(certifications)
                 embeddings["certifications"] = await EmbeddingService.generate_embedding(
                     certifications_text, model
                 )

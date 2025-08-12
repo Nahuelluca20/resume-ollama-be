@@ -10,7 +10,7 @@ from alembic import context
 # Import all models to ensure they're registered with SQLModel
 from app.models.cv_models import (
     Candidate, Resume, Experience, Education, Skill, ResumeSkill,
-    ResumeEmbedding, CertificationEmbedding
+    ResumeEmbedding, CertificationEmbedding, CVProcessingJob
 )
 from app.core.database import DatabaseConfig
 

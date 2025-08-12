@@ -1,5 +1,6 @@
 from typing import Optional, List
 from datetime import datetime
+import uuid
 from sqlmodel import SQLModel, Field, Relationship, Column
 from sqlalchemy import Text
 from pgvector.sqlalchemy import Vector
@@ -103,3 +104,21 @@ class CertificationEmbedding(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
     resume: Resume = Relationship()
+
+
+class CVProcessingJob(SQLModel, table=True):
+    """Track CV processing jobs for background task management."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    original_filename: str
+    file_size: int
+    status: str = Field(default="uploaded")  # uploaded, extracting, analyzing, storing, generating_embeddings, completed, failed
+    progress_percentage: int = Field(default=0)
+    current_step: Optional[str] = None
+    error_message: Optional[str] = Field(default=None, sa_column=Column(Text))
+    resume_id: Optional[int] = Field(default=None, foreign_key="resume.id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    estimated_completion: Optional[datetime] = None
+    
+    # Store file content temporarily (for small files)
+    file_content: Optional[bytes] = None

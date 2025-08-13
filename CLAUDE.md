@@ -91,20 +91,36 @@ The system follows a microservices architecture with these core components:
 - **Ollama LLM Integration**: Local model inference with structured JSON output
 - **Database Storage**: PostgreSQL with async SQLAlchemy and pgvector support
 - **Embedding Generation**: Optional semantic embeddings for search capabilities
+- **Job Matching System**: Dynamic job description matching against stored CVs
+- **LLM Match Explanations**: Detailed AI-generated explanations of candidate-job fit
+- **Similarity Scoring**: Multi-factor scoring (semantic, skills, experience) with weighted algorithms
+- **Background Processing**: Async CV processing with job status polling
 - **Health Monitoring**: Ollama service health checks and model availability
 - **Structured Data Schemas**: Comprehensive Pydantic models for CV data
 - **Error Handling**: Robust error handling with fallback mechanisms
 
 ### 🔄 API Endpoints
-- `POST /analyze-cv`: Upload PDF and get structured analysis
+
+#### CV Management
+- `POST /analyze-cv`: Upload PDF and get structured analysis (sync)
+- `POST /cv/upload`: Upload PDF for background processing (async with polling)
+- `GET /cv/status/{job_id}`: Poll status of background CV processing job
+- `GET /cv/{cv_id}`: Get completed CV analysis results
+- `GET /candidates`: List all candidates with summary information, filtering, and pagination
+
+#### Job Matching
+- `POST /match-job`: Match job description against stored CVs and get ranked candidates
+- `POST /explain-match/{resume_id}`: Generate detailed LLM explanation of why a CV matches a job
+
+#### System
 - `GET /health`: Check Ollama service and available models
 - `GET /models`: List available Ollama models
 
 ### 🎯 Next Steps
-- Job posting management and matching algorithms
-- Advanced embedding search and similarity scoring
 - User interface for CV management and job matching
-- Batch processing and background task queues
+- Batch processing optimization
+- Advanced filtering and search capabilities
+- Match result caching and performance optimization
 
 ## Development Notes
 

@@ -100,6 +100,58 @@ class OllamaService:
             )
 
     @staticmethod
+    async def generate_match_explanation(
+        job_description: str,
+        candidate_summary: str,
+        matched_skills: list,
+        experience_summary: str,
+        match_scores: dict,
+        model: str = DEFAULT_MODEL
+    ) -> str:
+        """Generate a detailed explanation of why a candidate matches a job."""
+        try:
+            prompt = f"""
+            You are an expert recruiter analyzing candidate-job matches. Provide a detailed explanation of why this candidate matches the job posting.
+
+            Job Description:
+            {job_description}
+
+            Candidate Profile:
+            - Summary: {candidate_summary}
+            - Matched Skills: {', '.join(matched_skills) if matched_skills else 'None specifically identified'}
+            - Experience Summary: {experience_summary}
+
+            Match Scores:
+            - Overall Match: {match_scores.get('overall_score', 0):.1%}
+            - Skills Match: {match_scores.get('skill_match_score', 0):.1%}
+            - Experience Match: {match_scores.get('experience_match_score', 0):.1%}
+            - Semantic Similarity: {match_scores.get('semantic_similarity_score', 0):.1%}
+
+            Please provide:
+            1. Key strengths and matches between the candidate and job requirements
+            2. Areas where the candidate excels for this role
+            3. Any potential gaps or areas for development
+            4. Overall assessment and recommendation
+
+            Keep the explanation concise but comprehensive (2-3 paragraphs).
+            """
+
+            response = ollama.chat(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+            )
+
+            return response["message"]["content"].strip()
+
+        except Exception as e:
+            return f"Error generating match explanation: {str(e)}"
+
+    @staticmethod
     def check_ollama_health() -> Dict[str, Any]:
         """Check Ollama service health and available models."""
         try:

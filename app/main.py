@@ -34,10 +34,16 @@ app.include_router(cv_router, prefix="/api/v1", tags=["cv"])
 @app.get("/")
 def read_root():
     return {
-        "message": "CV Analysis API",
+        "message": "CV Analysis and Job Matching API",
         "version": "0.1.0",
         "endpoints": {
             "analyze_cv": "/api/v1/analyze-cv",
-            "health": "/api/v1/health"
-        }
+            "upload_cv": "/api/v1/cv/upload",
+            "list_candidates": "/api/v1/candidates",
+            "match_job": "/api/v1/match-job",
+            "explain_match": "/api/v1/explain-match/{resume_id}",
+            "health": "/api/v1/health",
+            "models": "/api/v1/models"
+        },
+        "docs": "/docs"
     }

@@ -11,9 +11,10 @@ from app.services.pdf_service import PDFService
 from app.services.ollama_service import OllamaService
 from app.services.database_service import DatabaseService
 from app.services.embedding_service import EmbeddingService
-from app.schemas.cv_schemas import CVAnalysisResponse, HealthResponse, ErrorResponse
+from app.services.matching_service import MatchingService
+from app.schemas.cv_schemas import CVAnalysisResponse, HealthResponse, ErrorResponse, JobDescriptionRequest, JobMatchResponse, CandidateListResponse, CandidateSummary
 from app.core.database import get_db_session
-from app.models.cv_models import CVProcessingJob, Resume, Candidate
+from app.models.cv_models import CVProcessingJob, Resume, Candidate, Experience, Education, Skill, ResumeSkill
 
 router = APIRouter()
 
@@ -385,6 +386,251 @@ def list_models():
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error listing models: {str(e)}")
+
+
+@router.post("/match-job", response_model=JobMatchResponse)
+async def match_job_to_cvs(
+    job_request: JobDescriptionRequest,
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Match a job description against stored CVs and return ranked candidates.
+    
+    - **job_description**: The job posting text to match against
+    - **required_skills**: List of required skills (optional)
+    - **preferred_skills**: List of preferred skills (optional)
+    - **minimum_experience_years**: Minimum years of experience required (optional)
+    - **location_preference**: Preferred candidate location (optional)
+    - **max_results**: Maximum number of matches to return (default: 10)
+    """
+    start_time = time.time()
+    
+    try:
+        # Find matches using the matching service
+        match_results = await MatchingService.find_matches_with_session(job_request, db)
+        
+        if not match_results["success"]:
+            raise HTTPException(status_code=500, detail="Matching service failed")
+        
+        processing_time = time.time() - start_time
+        
+        # Create job description preview (first 200 characters)
+        job_preview = (
+            job_request.job_description[:200] + "..."
+            if len(job_request.job_description) > 200
+            else job_request.job_description
+        )
+        
+        return JobMatchResponse(
+            success=True,
+            job_description_preview=job_preview,
+            total_cvs_analyzed=match_results["total_cvs_analyzed"],
+            matches=match_results["matches"],
+            processing_time=processing_time,
+            timestamp=datetime.utcnow()
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error matching job to CVs: {str(e)}")
+
+
+@router.post("/explain-match/{resume_id}")
+async def explain_match(
+    resume_id: int,
+    job_request: JobDescriptionRequest,
+    model: Optional[str] = Query(default=None, description="Ollama model to use for explanation"),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Generate a detailed explanation of why a specific CV matches a job description.
+    
+    - **resume_id**: ID of the resume to explain the match for
+    - **job_request**: Job description and requirements to match against
+    - **model**: Optional Ollama model name (defaults to gpt-oss:20b)
+    """
+    try:
+        # Get the resume and candidate data
+        result = await db.execute(
+            select(Resume, Candidate).join(Candidate).where(Resume.id == resume_id)
+        )
+        resume_candidate = result.first()
+        
+        if not resume_candidate:
+            raise HTTPException(status_code=404, detail="Resume not found")
+        
+        resume, candidate = resume_candidate
+        
+        # Calculate match scores
+        job_embedding = await EmbeddingService.generate_job_embedding(job_request.job_description)
+        match = await MatchingService._calculate_match_score(
+            resume, candidate, job_request, job_embedding, db
+        )
+        
+        if not match:
+            raise HTTPException(status_code=500, detail="Could not calculate match scores")
+        
+        # Prepare data for explanation
+        candidate_summary = resume.summary or "No summary available"
+        experience_summary = " | ".join([
+            f"{exp.role} at {exp.company}" for exp in match.relevant_experience
+            if exp.role and exp.company
+        ]) or "No relevant experience found"
+        
+        # Generate explanation using Ollama
+        explanation = await OllamaService.generate_match_explanation(
+            job_description=job_request.job_description,
+            candidate_summary=candidate_summary,
+            matched_skills=match.matched_skills,
+            experience_summary=experience_summary,
+            match_scores={
+                "overall_score": match.match_score.overall_score,
+                "skill_match_score": match.match_score.skill_match_score,
+                "experience_match_score": match.match_score.experience_match_score,
+                "semantic_similarity_score": match.match_score.semantic_similarity_score
+            },
+            model=model or OllamaService.DEFAULT_MODEL
+        )
+        
+        # Update the match object with the explanation
+        match.match_score.explanation = explanation
+        
+        return {
+            "success": True,
+            "resume_id": resume_id,
+            "candidate_name": match.candidate_name,
+            "match": match,
+            "detailed_explanation": explanation,
+            "timestamp": datetime.utcnow()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating match explanation: {str(e)}")
+
+
+@router.get("/candidates", response_model=CandidateListResponse)
+async def list_candidates(
+    page: int = Query(1, ge=1, description="Page number (starting from 1)"),
+    page_size: int = Query(10, ge=1, le=100, description="Number of candidates per page"),
+    skill_filter: Optional[str] = Query(None, description="Filter candidates by skill name"),
+    location_filter: Optional[str] = Query(None, description="Filter candidates by location"),
+    min_experience: Optional[int] = Query(None, ge=0, description="Minimum years of experience"),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    List all candidates with their summary information.
+    
+    - **page**: Page number for pagination (default: 1)
+    - **page_size**: Number of candidates per page (default: 10, max: 100)
+    - **skill_filter**: Filter candidates by skill name (partial match)
+    - **location_filter**: Filter candidates by location (partial match)
+    - **min_experience**: Minimum years of experience
+    """
+    try:
+        # Build base query
+        query = select(Resume, Candidate).join(Candidate)
+        
+        # Apply filters if provided
+        if location_filter:
+            query = query.where(Candidate.location.ilike(f"%{location_filter}%"))
+        
+        # Get total count for pagination
+        count_query = select(Resume.id).join(Candidate)
+        if location_filter:
+            count_query = count_query.where(Candidate.location.ilike(f"%{location_filter}%"))
+        
+        total_result = await db.exec(count_query)
+        total_candidates = len(total_result.all())
+        
+        # Calculate pagination
+        total_pages = (total_candidates + page_size - 1) // page_size
+        offset = (page - 1) * page_size
+        
+        # Apply pagination
+        query = query.offset(offset).limit(page_size)
+        
+        # Execute query
+        result = await db.exec(query)
+        resumes_candidates = result.all()
+        
+        candidates_summary = []
+        
+        for resume, candidate in resumes_candidates:
+            # Get latest experience
+            exp_query = select(Experience).where(Experience.resume_id == resume.id).order_by(Experience.order_index.desc())
+            exp_result = await db.exec(exp_query)
+            latest_experience = exp_result.first()
+            
+            # Get top skills (limit to 5)
+            skills_query = select(ResumeSkill, Skill).join(Skill).where(ResumeSkill.resume_id == resume.id).limit(5)
+            skills_result = await db.exec(skills_query)
+            skills_data = skills_result.all()
+            top_skills = [skill.name for resume_skill, skill in skills_data if skill.name]
+            
+            # Apply skill filter if provided
+            if skill_filter:
+                skill_match = any(skill_filter.lower() in skill.lower() for skill in top_skills)
+                if not skill_match:
+                    continue
+            
+            # Get highest education level
+            edu_query = select(Education).where(Education.resume_id == resume.id).order_by(Education.order_index.desc())
+            edu_result = await db.exec(edu_query)
+            latest_education = edu_result.first()
+            
+            # Calculate years of experience (simplified)
+            years_experience = None
+            if latest_experience and latest_experience.start_date and latest_experience.end_date:
+                try:
+                    import re
+                    start_year = int(re.search(r'\d{4}', latest_experience.start_date).group())
+                    end_year = int(re.search(r'\d{4}', latest_experience.end_date).group())
+                    years_experience = end_year - start_year if end_year >= start_year else None
+                except (ValueError, AttributeError):
+                    years_experience = None
+            
+            # Apply experience filter
+            if min_experience is not None and years_experience is not None:
+                if years_experience < min_experience:
+                    continue
+            
+            candidate_summary = CandidateSummary(
+                resume_id=resume.id,
+                candidate_id=candidate.id,
+                name=getattr(candidate, 'name', None),  # Handle hashed names
+                email=getattr(candidate, 'email', None),  # Handle hashed emails
+                location=candidate.location,
+                summary=resume.summary,
+                top_skills=top_skills,
+                years_of_experience=years_experience,
+                latest_role=latest_experience.role if latest_experience else None,
+                latest_company=latest_experience.company if latest_experience else None,
+                education_level=latest_education.degree if latest_education else None,
+                created_at=resume.created_at,
+                updated_at=resume.updated_at
+            )
+            
+            candidates_summary.append(candidate_summary)
+        
+        # Update total count after filtering
+        actual_total = len(candidates_summary) if skill_filter or min_experience else total_candidates
+        actual_total_pages = (actual_total + page_size - 1) // page_size if actual_total > 0 else 1
+        
+        return CandidateListResponse(
+            success=True,
+            total_candidates=actual_total,
+            candidates=candidates_summary,
+            page=page,
+            page_size=page_size,
+            total_pages=actual_total_pages,
+            timestamp=datetime.utcnow()
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing candidates: {str(e)}")
 
 
 async def update_job_status(

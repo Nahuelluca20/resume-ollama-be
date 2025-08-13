@@ -5,7 +5,8 @@ from fastapi import HTTPException
 
 
 class OllamaService:
-    DEFAULT_MODEL = "gpt-oss:20b"
+    # DEFAULT_MODEL = "gpt-oss:20b"
+    DEFAULT_MODEL = "gemma3:4b"
 
     @staticmethod
     async def analyze_cv_with_ollama(
@@ -19,12 +20,13 @@ class OllamaService:
             Be thorough and accurate in your extraction.
 
             Please respond with a valid JSON object following this exact structure:
+            IMPORTANT: Use null for any field where the actual information is not found in the CV text. Do not use placeholder text.
             {{
                 "personal_info": {{
-                    "name": "Full Name or null",
-                    "email": "email@example.com or null",
-                    "phone": "Phone number or null",
-                    "location": "Location or null"
+                    "name": "Full Name or null if not found",
+                    "email": "actual.email@domain.com or null if not found",
+                    "phone": "actual phone number or null if not found",
+                    "location": "actual city/location or null if not found"
                 }},
                 "summary": "Professional summary or null",
                 "skills": [
@@ -73,7 +75,15 @@ class OllamaService:
             print(response)
             analysis_text = response["message"]["content"].strip()
 
-            # Parse JSON response directly
+            # Extract JSON from markdown code block if present
+            if analysis_text.startswith("```json"):
+                # Extract JSON content from markdown code block
+                start_idx = analysis_text.find("{")
+                end_idx = analysis_text.rfind("}") + 1
+                if start_idx != -1 and end_idx > start_idx:
+                    analysis_text = analysis_text[start_idx:end_idx]
+
+            # Parse JSON response
             try:
                 analysis = json.loads(analysis_text)
 
@@ -106,7 +116,7 @@ class OllamaService:
         matched_skills: list,
         experience_summary: str,
         match_scores: dict,
-        model: str = DEFAULT_MODEL
+        model: str = DEFAULT_MODEL,
     ) -> str:
         """Generate a detailed explanation of why a candidate matches a job."""
         try:

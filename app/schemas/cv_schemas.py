@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 from pydantic import BaseModel
 
@@ -22,8 +22,8 @@ class EducationSchema(BaseModel):
     institution: Optional[str] = None
     degree: Optional[str] = None
     field: Optional[str] = None
-    start_year: Optional[str] = None
-    end_year: Optional[str] = None
+    start_year: Optional[Union[str, int]] = None
+    end_year: Optional[Union[str, int]] = None
 
 
 class SkillSchema(BaseModel):

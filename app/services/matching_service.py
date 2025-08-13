@@ -1,7 +1,8 @@
 from typing import List, Dict, Any, Optional
 import re
 import time
-from sqlmodel import Session, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
 from fastapi import HTTPException
 
 from app.models.cv_models import Resume, ResumeEmbedding, Skill, ResumeSkill, Experience, Candidate
@@ -14,17 +15,21 @@ class MatchingService:
     """Service for matching job descriptions against stored CVs."""
     
     @staticmethod
-    async def find_matches_with_session(job_request: JobDescriptionRequest, session: Session) -> Dict[str, Any]:
+    async def find_matches_with_session(job_request: JobDescriptionRequest, session: AsyncSession) -> Dict[str, Any]:
         """Find matching CVs for a given job description using provided database session."""
         start_time = time.time()
         
         try:
             # Generate job description embedding
-            job_embedding = await EmbeddingService.generate_job_embedding(job_request.job_description)
+            try:
+                job_embedding = await EmbeddingService.generate_job_embedding(job_request.job_description)
+            except Exception as e:
+                print(f"Warning: Could not generate job embedding: {e}. Using empty embedding.")
+                job_embedding = [0.0] * 768  # Default embedding size
             
             # Get all resumes with their candidates
             query = select(Resume, Candidate).join(Candidate).where(Resume.id.is_not(None))
-            result = await session.exec(query)
+            result = await session.execute(query)
             resumes_with_candidates = result.all()
             
             if not resumes_with_candidates:
@@ -42,8 +47,10 @@ class MatchingService:
                     match = await MatchingService._calculate_match_score(
                         resume, candidate, job_request, job_embedding, session
                     )
-                    if match and match.match_score.overall_score > 0.1:  # Minimum threshold
+                    print(f"Resume {resume.id}: match={match is not None}, score={match.match_score.overall_score if match else 'None'}")
+                    if match:  # Remove threshold temporarily for debugging
                         matches.append(match)
+                        print(f"Added resume {resume.id} to matches")
                 except Exception as e:
                     print(f"Error processing resume {resume.id}: {str(e)}")
                     continue
@@ -74,31 +81,35 @@ class MatchingService:
         candidate: Candidate, 
         job_request: JobDescriptionRequest,
         job_embedding: List[float],
-        session: Session
+        session: AsyncSession
     ) -> Optional[CVMatch]:
         """Calculate match score between a resume and job description."""
         try:
+            print(f"Processing resume {resume.id}: summary={resume.summary[:50] if resume.summary else 'None'}...")
             # Get resume embeddings
             embedding_query = select(ResumeEmbedding).where(
                 ResumeEmbedding.resume_id == resume.id,
                 ResumeEmbedding.section_type == "full_text"
             )
-            embedding_result = await session.exec(embedding_query)
+            embedding_result = await session.execute(embedding_query)
             resume_embedding_obj = embedding_result.first()
             
             if not resume_embedding_obj:
-                return None
-            
-            # Calculate semantic similarity
-            semantic_score = EmbeddingService.calculate_cosine_similarity(
-                job_embedding, resume_embedding_obj.embedding
-            )
+                # Fallback: use text similarity when embeddings are missing
+                semantic_score = MatchingService._calculate_text_similarity(
+                    job_request.job_description, resume.summary or resume.raw_text[:1000]
+                )
+            else:
+                # Calculate semantic similarity using embeddings
+                semantic_score = EmbeddingService.calculate_cosine_similarity(
+                    job_embedding, resume_embedding_obj.embedding
+                )
             
             # Get resume skills
             skills_query = select(ResumeSkill, Skill).join(Skill).where(
                 ResumeSkill.resume_id == resume.id
             )
-            skills_result = await session.exec(skills_query)
+            skills_result = await session.execute(skills_query)
             resume_skills = skills_result.all()
             
             # Calculate skill match score
@@ -108,7 +119,7 @@ class MatchingService:
             
             # Get resume experiences
             experience_query = select(Experience).where(Experience.resume_id == resume.id)
-            experiences_result = await session.exec(experience_query)
+            experiences_result = await session.execute(experience_query)
             experiences = experiences_result.all()
             
             # Calculate experience match score
@@ -134,11 +145,11 @@ class MatchingService:
             # Convert experiences to schema format
             relevant_exp_schemas = [
                 ExperienceSchema(
-                    company=exp.company,
-                    role=exp.role,
-                    start_date=exp.start_date,
-                    end_date=exp.end_date,
-                    description=exp.description
+                    company=getattr(exp, 'company', None),
+                    role=getattr(exp, 'role', None),
+                    start_date=getattr(exp, 'start_date', None),
+                    end_date=getattr(exp, 'end_date', None),
+                    description=getattr(exp, 'description', None)
                 )
                 for exp in relevant_experiences
             ]
@@ -274,11 +285,14 @@ class MatchingService:
         relevant_experiences = []
         
         for exp in experiences:
+            if not exp:  # Skip if experience is None
+                continue
+                
             # Check if experience contains relevant keywords
             exp_text = " ".join(filter(None, [
-                exp.role or "",
-                exp.company or "",
-                exp.description or ""
+                getattr(exp, 'role', None) or "",
+                getattr(exp, 'company', None) or "",
+                getattr(exp, 'description', None) or ""
             ])).lower()
             
             exp_keywords = set(re.findall(r'\b\w+\b', exp_text))
@@ -288,7 +302,24 @@ class MatchingService:
             overlap_ratio = len(common_keywords) / len(job_keywords) if job_keywords else 0
             
             # Consider relevant if there's significant keyword overlap
-            if overlap_ratio > 0.1:  # At least 10% keyword overlap
+            if overlap_ratio > 0.05:  # At least 5% keyword overlap
                 relevant_experiences.append(exp)
         
         return relevant_experiences if relevant_experiences else experiences[:3]  # Return top 3 if none are particularly relevant
+    
+    @staticmethod
+    def _calculate_text_similarity(job_description: str, resume_text: str) -> float:
+        """Calculate text similarity when embeddings are not available."""
+        if not job_description or not resume_text:
+            return 0.0
+        
+        # Simple keyword overlap calculation
+        job_keywords = set(re.findall(r'\b\w+\b', job_description.lower()))
+        resume_keywords = set(re.findall(r'\b\w+\b', resume_text.lower()))
+        
+        if not job_keywords:
+            return 0.0
+        
+        # Calculate overlap ratio
+        intersection = job_keywords.intersection(resume_keywords)
+        return len(intersection) / len(job_keywords) if job_keywords else 0.0

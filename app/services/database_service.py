@@ -11,35 +11,53 @@ from app.models.cv_models import (
 )
 
 
-class PIIHasher:
-    """Utility class for hashing PII data for privacy."""
+class PlainTextValidator:
+    """Utility class for validating personal information."""
+    
+    # Common placeholder values that should be treated as None
+    PLACEHOLDER_VALUES = {
+        "name", "full name", "candidate name", "your name", "insert name",
+        "email", "email address", "your email", "candidate email", "insert email",
+        "phone", "phone number", "contact number", "your phone", "telephone",
+        "location", "city", "address", "your location", "insert location"
+    }
     
     @staticmethod
-    def hash_pii(value: str, salt: str = "cv_ollama_salt") -> str:
-        """Hash PII data with salt for privacy protection."""
+    def is_placeholder(value: str) -> bool:
+        """Check if a value is a placeholder."""
         if not value:
+            return True
+        normalized = value.lower().strip()
+        return normalized in PlainTextValidator.PLACEHOLDER_VALUES or len(normalized) < 2
+    
+    @staticmethod
+    def clean_name(name: str) -> Optional[str]:
+        """Clean and validate candidate name."""
+        if not name or PlainTextValidator.is_placeholder(name):
             return None
-        combined = f"{salt}:{value.lower().strip()}"
-        return hashlib.sha256(combined.encode()).hexdigest()
+        return name.strip()
     
     @staticmethod
-    def hash_name(name: str) -> Optional[str]:
-        """Hash candidate name."""
-        return PIIHasher.hash_pii(name) if name else None
-    
-    @staticmethod
-    def hash_email(email: str) -> Optional[str]:
-        """Hash candidate email."""
-        return PIIHasher.hash_pii(email) if email else None
-    
-    @staticmethod
-    def hash_phone(phone: str) -> Optional[str]:
-        """Hash candidate phone number."""
-        if not phone:
+    def clean_email(email: str) -> Optional[str]:
+        """Clean and validate candidate email."""
+        if not email or PlainTextValidator.is_placeholder(email):
             return None
-        # Clean phone number (remove spaces, dashes, parentheses)
-        cleaned_phone = ''.join(filter(str.isdigit, phone))
-        return PIIHasher.hash_pii(cleaned_phone)
+        # Basic email validation
+        email = email.strip().lower()
+        if "@" not in email or "." not in email:
+            return None
+        return email
+    
+    @staticmethod
+    def clean_phone(phone: str) -> Optional[str]:
+        """Clean and validate candidate phone number."""
+        if not phone or PlainTextValidator.is_placeholder(phone):
+            return None
+        # Clean phone number (remove spaces, dashes, parentheses) but keep original format
+        cleaned_digits = ''.join(filter(str.isdigit, phone))
+        if len(cleaned_digits) < 7:  # Minimum reasonable phone number length
+            return None
+        return phone.strip()
 
 
 class DatabaseService:
@@ -57,19 +75,22 @@ class DatabaseService:
     ) -> Candidate:
         """Get existing candidate or create new one based on PII hashes."""
         
-        # Hash PII data
-        name_hash = PIIHasher.hash_name(name)
-        email_hash = PIIHasher.hash_email(email)
-        phone_hash = PIIHasher.hash_phone(phone)
+        # Clean and validate PII data
+        clean_name = PlainTextValidator.clean_name(name)
+        clean_email = PlainTextValidator.clean_email(email)
+        clean_phone = PlainTextValidator.clean_phone(phone)
         
-        # Try to find existing candidate by email or name hash
+        # Filter out placeholder location values
+        valid_location = location if location and not PlainTextValidator.is_placeholder(location) else None
+        
+        # Try to find existing candidate by email or name
         query = select(Candidate)
         conditions = []
         
-        if email_hash:
-            conditions.append(Candidate.email_hash == email_hash)
-        if name_hash and not email_hash:  # Only use name if no email
-            conditions.append(Candidate.name_hash == name_hash)
+        if clean_email:
+            conditions.append(Candidate.email == clean_email)
+        if clean_name and not clean_email:  # Only use name if no email
+            conditions.append(Candidate.name == clean_name)
         
         if conditions:
             query = query.where(conditions[0])
@@ -78,25 +99,24 @@ class DatabaseService:
             
             if candidate:
                 # Update location if provided and different
-                if location and candidate.location != location:
-                    candidate.location = location
+                if valid_location and candidate.location != valid_location:
+                    candidate.location = valid_location
                     candidate.updated_at = datetime.utcnow()
-                    await self.session.commit()
+                    await self.session.flush()
                 return candidate
         
         # Create new candidate
         candidate = Candidate(
-            name_hash=name_hash,
-            email_hash=email_hash,
-            phone_hash=phone_hash,
-            location=location,
+            name=clean_name,
+            email=clean_email,
+            phone=clean_phone,
+            location=valid_location,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow()
         )
         
         self.session.add(candidate)
-        await self.session.commit()
-        await self.session.refresh(candidate)
+        await self.session.flush()  # Flush to get ID without committing
         return candidate
     
     async def create_resume(
@@ -131,8 +151,7 @@ class DatabaseService:
         )
         
         self.session.add(resume)
-        await self.session.commit()
-        await self.session.refresh(resume)
+        await self.session.flush()  # Flush to get ID without committing
         return resume
     
     async def store_experience(self, resume_id: int, experiences: List[Dict]) -> List[Experience]:
@@ -152,9 +171,7 @@ class DatabaseService:
             experience_records.append(experience)
             self.session.add(experience)
         
-        await self.session.commit()
-        for exp in experience_records:
-            await self.session.refresh(exp)
+        await self.session.flush()  # Flush to get IDs without committing
         
         return experience_records
     
@@ -168,23 +185,20 @@ class DatabaseService:
                 institution=edu_data.get("institution"),
                 degree=edu_data.get("degree"),
                 field=edu_data.get("field"),
-                start_year=edu_data.get("start_year"),
-                end_year=edu_data.get("end_year"),
+                start_year=str(edu_data.get("start_year")) if edu_data.get("start_year") else None,
+                end_year=str(edu_data.get("end_year")) if edu_data.get("end_year") else None,
                 order_index=idx
             )
             education_records.append(education)
             self.session.add(education)
         
-        await self.session.commit()
-        for edu in education_records:
-            await self.session.refresh(edu)
-        
+        await self.session.flush()  # Flush to get IDs without committing
         return education_records
     
     async def get_or_create_skill(self, skill_name: str, category: Optional[str] = None) -> Skill:
         """Get existing skill or create new one."""
-        # Normalize skill name
-        normalized_name = skill_name.strip().lower()
+        # Normalize skill name for consistent storage
+        normalized_name = skill_name.strip()
         
         query = select(Skill).where(Skill.name == normalized_name)
         result = await self.session.execute(query)
@@ -196,8 +210,7 @@ class DatabaseService:
                 category=category
             )
             self.session.add(skill)
-            await self.session.commit()
-            await self.session.refresh(skill)
+            await self.session.flush()  # Flush to get ID without committing transaction
         
         return skill
     
@@ -226,10 +239,7 @@ class DatabaseService:
             resume_skills.append(resume_skill)
             self.session.add(resume_skill)
         
-        await self.session.commit()
-        for rs in resume_skills:
-            await self.session.refresh(rs)
-        
+        await self.session.flush()  # Flush to get IDs without committing
         return resume_skills
     
     async def store_cv_analysis(
@@ -303,6 +313,8 @@ class DatabaseService:
             ]
             await self.store_skills(resume.id, skill_dicts)
         
+        # Commit all changes at the end
+        await self.session.commit()
         return resume
     
     async def store_embedding(

@@ -8,9 +8,9 @@ from pgvector.sqlalchemy import Vector
 
 class Candidate(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    name_hash: Optional[str] = Field(index=True)
-    email_hash: Optional[str] = Field(index=True)
-    phone_hash: Optional[str] = None
+    name: Optional[str] = Field(index=True)
+    email: Optional[str] = Field(index=True)
+    phone: Optional[str] = None
     location: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

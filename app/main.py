@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.api.cv_router import router as cv_router
@@ -27,6 +28,15 @@ app = FastAPI(
     description="CV parsing and analysis using Ollama",
     version="0.1.0",
     lifespan=lifespan
+)
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(cv_router, prefix="/api/v1", tags=["cv"])

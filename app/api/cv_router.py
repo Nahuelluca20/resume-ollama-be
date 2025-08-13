@@ -151,9 +151,9 @@ async def get_cv_analysis(
             "filename": resume.original_filename,
             "summary": resume.summary,
             "candidate": {
-                "name_hash": candidate.name_hash if candidate else None,
-                "email_hash": candidate.email_hash if candidate else None,
-                "phone_hash": candidate.phone_hash if candidate else None,
+                "name": candidate.name if candidate else None,
+                "email": candidate.email if candidate else None,
+                "phone": candidate.phone if candidate else None,
                 "location": candidate.location if candidate else None,
             },
             "raw_text_preview": resume.raw_text[:500] + "..." if len(resume.raw_text) > 500 else resume.raw_text,
@@ -244,12 +244,15 @@ async def analyze_cv(
 
         if store_in_db and analysis:
             try:
+                # Convert analysis to dict for consistent handling
+                analysis_dict = analysis.model_dump() if hasattr(analysis, 'model_dump') else analysis
+                
                 db_service = DatabaseService(db)
                 resume = await db_service.store_cv_analysis(
                     filename=file.filename,
                     file_content=pdf_content,
                     raw_text=extracted_text,
-                    analysis=analysis,
+                    analysis=analysis_dict,
                 )
                 resume_id = resume.id
 
@@ -257,7 +260,8 @@ async def analyze_cv(
                 if generate_embeddings:
                     try:
                         embeddings = await EmbeddingService.generate_cv_embeddings(
-                            analysis, extracted_text
+                            analysis_dict, 
+                            extracted_text
                         )
 
                         # Store each embedding section
@@ -265,33 +269,29 @@ async def analyze_cv(
                             if section_type == "full_text":
                                 content = extracted_text
                             elif section_type == "summary":
-                                content = analysis.summary
+                                content = analysis_dict.get("summary", "")
                             elif section_type == "skills":
-                                content = " ".join(
-                                    [
-                                        skill.name
-                                        for skill in analysis.skills
-                                        if skill.name
-                                    ]
-                                )
+                                skills = analysis_dict.get("skills", [])
+                                content = " ".join([
+                                    skill.get("name", "") for skill in skills if skill.get("name")
+                                ])
                             elif section_type == "experience":
-                                content = " | ".join(
-                                    [
-                                        f"{exp.role} at {exp.company}"
-                                        for exp in analysis.experience
-                                        if exp.role and exp.company
-                                    ]
-                                )
+                                experiences = analysis_dict.get("experience", [])
+                                content = " | ".join([
+                                    f"{exp.get('role', '')} at {exp.get('company', '')}"
+                                    for exp in experiences
+                                    if exp.get('role') and exp.get('company')
+                                ])
                             elif section_type == "education":
-                                content = " | ".join(
-                                    [
-                                        f"{edu.degree} in {edu.field} from {edu.institution}"
-                                        for edu in analysis.education
-                                        if edu.degree and edu.institution
-                                    ]
-                                )
+                                educations = analysis_dict.get("education", [])
+                                content = " | ".join([
+                                    f"{edu.get('degree', '')} in {edu.get('field', '')} from {edu.get('institution', '')}"
+                                    for edu in educations
+                                    if edu.get('degree') and edu.get('institution')
+                                ])
                             elif section_type == "certifications":
-                                content = " | ".join(analysis.certifications)
+                                certifications = analysis_dict.get("certifications", [])
+                                content = " | ".join(certifications) if certifications else ""
                             else:
                                 content = ""
 
@@ -542,8 +542,8 @@ async def list_candidates(
         if location_filter:
             count_query = count_query.where(Candidate.location.ilike(f"%{location_filter}%"))
         
-        total_result = await db.exec(count_query)
-        total_candidates = len(total_result.all())
+        total_result = await db.execute(count_query)
+        total_candidates = len(total_result.scalars().all())
         
         # Calculate pagination
         total_pages = (total_candidates + page_size - 1) // page_size
@@ -553,7 +553,7 @@ async def list_candidates(
         query = query.offset(offset).limit(page_size)
         
         # Execute query
-        result = await db.exec(query)
+        result = await db.execute(query)
         resumes_candidates = result.all()
         
         candidates_summary = []
@@ -561,12 +561,17 @@ async def list_candidates(
         for resume, candidate in resumes_candidates:
             # Get latest experience
             exp_query = select(Experience).where(Experience.resume_id == resume.id).order_by(Experience.order_index.desc())
-            exp_result = await db.exec(exp_query)
-            latest_experience = exp_result.first()
+            exp_result = await db.execute(exp_query)
+            latest_experience = exp_result.scalars().first()
+            
+            # Get all experiences for calculating total years
+            all_exp_query = select(Experience).where(Experience.resume_id == resume.id)
+            all_exp_result = await db.execute(all_exp_query)
+            all_experiences = all_exp_result.scalars().all()
             
             # Get top skills (limit to 5)
             skills_query = select(ResumeSkill, Skill).join(Skill).where(ResumeSkill.resume_id == resume.id).limit(5)
-            skills_result = await db.exec(skills_query)
+            skills_result = await db.execute(skills_query)
             skills_data = skills_result.all()
             top_skills = [skill.name for resume_skill, skill in skills_data if skill.name]
             
@@ -578,30 +583,41 @@ async def list_candidates(
             
             # Get highest education level
             edu_query = select(Education).where(Education.resume_id == resume.id).order_by(Education.order_index.desc())
-            edu_result = await db.exec(edu_query)
-            latest_education = edu_result.first()
+            edu_result = await db.execute(edu_query)
+            latest_education = edu_result.scalars().first()
             
-            # Calculate years of experience (simplified)
-            years_experience = None
-            if latest_experience and latest_experience.start_date and latest_experience.end_date:
-                try:
-                    import re
-                    start_year = int(re.search(r'\d{4}', latest_experience.start_date).group())
-                    end_year = int(re.search(r'\d{4}', latest_experience.end_date).group())
-                    years_experience = end_year - start_year if end_year >= start_year else None
-                except (ValueError, AttributeError):
+            # Calculate total years of experience by summing all positions
+            years_experience = 0
+            if all_experiences:
+                import re
+                for exp in all_experiences:
+                    try:
+                        if hasattr(exp, 'start_date') and hasattr(exp, 'end_date'):
+                            if exp.start_date and exp.end_date:
+                                start_match = re.search(r'\d{4}', str(exp.start_date))
+                                end_match = re.search(r'\d{4}', str(exp.end_date))
+                                if start_match and end_match:
+                                    start_year = int(start_match.group())
+                                    end_year = int(end_match.group())
+                                    if end_year >= start_year:
+                                        years_experience += end_year - start_year
+                    except (ValueError, AttributeError, TypeError):
+                        continue
+                
+                # Set to None if no valid experience calculated
+                if years_experience == 0:
                     years_experience = None
             
             # Apply experience filter
-            if min_experience is not None and years_experience is not None:
-                if years_experience < min_experience:
+            if min_experience is not None:
+                if years_experience is None or years_experience < min_experience:
                     continue
             
             candidate_summary = CandidateSummary(
                 resume_id=resume.id,
                 candidate_id=candidate.id,
-                name=getattr(candidate, 'name', None),  # Handle hashed names
-                email=getattr(candidate, 'email', None),  # Handle hashed emails
+                name=candidate.name,
+                email=candidate.email,
                 location=candidate.location,
                 summary=resume.summary,
                 top_skills=top_skills,
@@ -642,9 +658,9 @@ async def update_job_status(
     error_message: Optional[str] = None
 ):
     """Helper function to update job status in database."""
-    from app.core.database import get_db_session
+    from app.core.database import db_manager
     
-    async for db in get_db_session():
+    async for db in db_manager.get_async_session():
         try:
             result = await db.execute(select(CVProcessingJob).where(CVProcessingJob.id == job_id))
             job = result.scalar_one_or_none()
@@ -663,8 +679,6 @@ async def update_job_status(
                 await db.commit()
         except Exception as e:
             print(f"Error updating job status: {e}")
-        finally:
-            await db.close()
         break
 
 
@@ -710,7 +724,8 @@ async def process_cv_background(
         # Store in database if requested
         resume_id = None
         if store_in_db:
-            async for db in get_db_session():
+            from app.core.database import db_manager
+            async for db in db_manager.get_async_session():
                 try:
                     db_service = DatabaseService(db)
                     resume = await db_service.store_cv_analysis(
@@ -779,8 +794,6 @@ async def process_cv_background(
                         error_message=f"Failed to store in database: {str(e)}"
                     )
                     return
-                finally:
-                    await db.close()
                 break
         
         # Complete successfully
